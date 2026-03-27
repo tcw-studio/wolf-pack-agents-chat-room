@@ -61,8 +61,6 @@ def main():
     sse_port = config.get("mcp", {}).get("sse_port", 8201)
     mcp_bridge.mcp_http.settings.port = http_port
     mcp_bridge.mcp_sse.settings.port = sse_port
-    mcp_bridge.mcp_http.settings.host = host
-    mcp_bridge.mcp_sse.settings.host = host
 
     threading.Thread(target=mcp_bridge.run_http_server, daemon=True).start()
     threading.Thread(target=mcp_bridge.run_sse_server, daemon=True).start()
