@@ -56,10 +56,13 @@ def main():
     mcp_bridge._load_roles()
 
     # Start MCP servers in background threads
+    host = config.get("server", {}).get("host", "127.0.0.1")
     http_port = config.get("mcp", {}).get("http_port", 8200)
     sse_port = config.get("mcp", {}).get("sse_port", 8201)
     mcp_bridge.mcp_http.settings.port = http_port
     mcp_bridge.mcp_sse.settings.port = sse_port
+    mcp_bridge.mcp_http.settings.host = host
+    mcp_bridge.mcp_sse.settings.host = host
 
     threading.Thread(target=mcp_bridge.run_http_server, daemon=True).start()
     threading.Thread(target=mcp_bridge.run_sse_server, daemon=True).start()
@@ -97,7 +100,6 @@ def main():
 
     # Run web server
     import uvicorn
-    host = config.get("server", {}).get("host", "127.0.0.1")
     port = config.get("server", {}).get("port", 8300)
 
     # --- Security: warn if binding to a non-localhost address ---
@@ -117,13 +119,14 @@ def main():
             sys.exit(1)
         else:
             print()
-            try:
-                confirm = input("  Type YES to accept these risks and start: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                confirm = ""
-            if confirm != "YES":
-                print("  Aborted.\n")
-                sys.exit(1)
+            if "--yes" not in sys.argv:
+                try:
+                    confirm = input("  Type YES to accept these risks and start: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    confirm = ""
+                if confirm != "YES":
+                    print("  Aborted.\n")
+                    sys.exit(1)
 
     print(f"\n  agentchattr")
     print(f"  Web UI:  http://{host}:{port}")

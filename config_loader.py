@@ -31,12 +31,20 @@ def load_config(root: Path | None = None) -> dict:
         
         # Merge [agents] section — local agents are added ONLY if they don't already exist.
         # This protects the "holy trinity" (claude, codex, gemini) from being overridden.
-        local_agents = local.get("agents", {})
+        local_agents = local.pop("agents", {})
         config_agents = config.setdefault("agents", {})
         for name, agent_cfg in local_agents.items():
             if name not in config_agents:
                 config_agents[name] = agent_cfg
             else:
                 print(f"  Warning: Ignoring local agent '{name}' (already defined in config.toml)")
+
+        # Deep-merge all other sections — local values override base config.
+        # This allows config.local.toml to override [server], [mcp], etc. per deployment.
+        for section, values in local.items():
+            if section in config and isinstance(config[section], dict):
+                config[section].update(values)
+            else:
+                config[section] = values
 
     return config

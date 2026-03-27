@@ -176,6 +176,8 @@ def _install_security_middleware(token: str, cfg: dict):
         f"http://127.0.0.1:{port}",
         f"http://localhost:{port}",
     }
+    for origin in cfg.get("server", {}).get("allowed_origins", []):
+        allowed_origins.add(origin)
 
     class SecurityMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
