@@ -186,17 +186,7 @@ def _install_security_middleware(token: str, cfg: dict):
             # Static assets, index page, and uploaded images are public.
             # The index page injects the token client-side via same-origin script.
             # Uploads use random filenames and have path-traversal protection.
-            if path == "/" or path.startswith(("/static/", "/uploads/", "/api/roles")):
-                return await call_next(request)
-
-            # Agent registration/heartbeat: loopback only (no remote agent minting).
-            if path.startswith(("/api/register", "/api/deregister/", "/api/heartbeat/")):
-                client_ip = request.client.host if request.client else ""
-                if client_ip not in ("127.0.0.1", "::1", "localhost"):
-                    return JSONResponse(
-                        {"error": f"forbidden: agent registration is restricted to local loopback. Source {client_ip} is not allowed."},
-                        status_code=403,
-                    )
+            if path == "/" or path.startswith(("/static/", "/uploads/", "/api/roles", "/api/register")):
                 return await call_next(request)
 
             # --- Origin check (blocks cross-origin / DNS-rebinding attacks) ---
@@ -211,7 +201,10 @@ def _install_security_middleware(token: str, cfg: dict):
             # Allow registered agents to authenticate via Bearer token
             # for /api/messages and /api/send (no browser session needed).
             auth_header = request.headers.get("authorization", "")
-            if auth_header.lower().startswith("bearer ") and (path in ("/api/messages", "/api/send") or path.startswith("/api/rules/")):
+            if auth_header.lower().startswith("bearer ") and (
+                path in ("/api/messages", "/api/send")
+                or path.startswith(("/api/rules/", "/api/heartbeat/", "/api/deregister/", "/api/trigger/"))
+            ):
                 bearer = auth_header[7:].strip()
                 if _self.registry and _self.registry.resolve_token(bearer):
                     return await call_next(request)
@@ -2195,6 +2188,35 @@ async def heartbeat(agent_name: str, request: Request):
                 with mcp_bridge._presence_lock:
                     mcp_bridge._presence[canonical] = now
     return resp
+
+
+@app.get("/api/trigger/{agent_name}")
+async def poll_trigger(agent_name: str, request: Request):
+    """Remote wrapper polls this to drain the queue instead of reading a local file.
+
+    Returns pending trigger entries for the agent and clears them atomically.
+    Only the authenticated agent may poll its own queue.
+    """
+    auth_inst = _resolve_authenticated_agent(request)
+    if not auth_inst or auth_inst["name"] != agent_name:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    if not agents:
+        return JSONResponse({"entries": []})
+    queue_file = agents._data_dir / f"{agent_name}_queue.jsonl"
+    if not queue_file.exists() or queue_file.stat().st_size == 0:
+        return JSONResponse({"entries": []})
+    with open(queue_file, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    queue_file.write_text("", "utf-8")
+    entries = []
+    for line in lines:
+        line = line.strip()
+        if line:
+            try:
+                entries.append(json.loads(line))
+            except Exception:
+                pass
+    return JSONResponse({"entries": entries})
 
 
 # --- Open agent session in terminal ---

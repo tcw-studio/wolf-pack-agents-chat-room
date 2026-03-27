@@ -164,8 +164,11 @@ def _resolve_mcp_inject(agent: str, agent_cfg: dict) -> dict:
     return {}
 
 
-def _get_server_url(mcp_cfg: dict, transport: str) -> str:
+def _get_server_url(mcp_cfg: dict, transport: str, *, server_base: str = "") -> str:
     """Build the MCP server URL for the given transport."""
+    if server_base:
+        path = "/sse" if transport == "sse" else "/mcp"
+        return f"{server_base.rstrip('/')}{path}"
     if transport == "sse":
         port = mcp_cfg.get("sse_port", 8201)
         return f"http://127.0.0.1:{port}/sse"
@@ -182,6 +185,7 @@ def _apply_mcp_inject(
     token: str = "",
     mcp_cfg: dict | None = None,
     project_dir: Path | None = None,
+    server_base: str = "",
 ) -> tuple[list[str], dict[str, str], Path | None]:
     """Apply MCP config injection based on the resolved inject config.
 
@@ -197,7 +201,7 @@ def _apply_mcp_inject(
     settings_path: Path | None = None
     config_dir = data_dir / "provider-config"
     transport = inject_cfg.get("mcp_transport", "http")
-    server_url = _get_server_url(mcp_cfg or {}, transport)
+    server_url = _get_server_url(mcp_cfg or {}, transport, server_base=server_base)
 
     if mode == "settings_file":
         # Write a settings JSON file at a user-specified path (e.g. .qwen/settings.json)
@@ -305,6 +309,7 @@ def _build_provider_launch(
     token: str = "",
     mcp_cfg: dict | None = None,
     project_dir: Path | None = None,
+    server_base: str = "",
 ) -> tuple[list[str], dict[str, str], dict[str, str], Path | None]:
     """Return provider-specific launch args/env/inject_env/settings_path.
 
@@ -316,7 +321,7 @@ def _build_provider_launch(
     inject_cfg = _resolve_mcp_inject(agent, agent_cfg)
     mcp_args, inject_env, settings_path = _apply_mcp_inject(
         inject_cfg, instance_name, data_dir, proxy_url,
-        token=token, mcp_cfg=mcp_cfg, project_dir=project_dir,
+        token=token, mcp_cfg=mcp_cfg, project_dir=project_dir, server_base=server_base,
     )
 
     launch_args = [*mcp_args, *extra_args]
@@ -325,12 +330,14 @@ def _build_provider_launch(
     return launch_args, launch_env, inject_env, settings_path
 
 
-def _register_instance(server_port: int, base: str, label: str | None = None) -> dict:
+def _register_instance(server_port: int, base: str, label: str | None = None, *, server_base: str = "") -> dict:
     import urllib.request
 
+    url = (f"{server_base.rstrip('/')}/api/register" if server_base
+           else f"http://127.0.0.1:{server_port}/api/register")
     reg_body = json.dumps({"base": base, "label": label}).encode()
     reg_req = urllib.request.Request(
-        f"http://127.0.0.1:{server_port}/api/register",
+        url,
         method="POST",
         data=reg_body,
         headers={"Content-Type": "application/json"},
@@ -367,11 +374,13 @@ _IDENTITY_HINT = (
 )
 
 
-def _fetch_role(server_port: int, agent_name: str) -> str:
+def _fetch_role(server_port: int, agent_name: str, *, server_base: str = "") -> str:
     """Fetch this agent's role from the server status endpoint."""
     try:
         import urllib.request
-        req = urllib.request.Request(f"http://127.0.0.1:{server_port}/api/roles")
+        url = (f"{server_base.rstrip('/')}/api/roles" if server_base
+               else f"http://127.0.0.1:{server_port}/api/roles")
+        req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=3) as resp:
             roles = json.loads(resp.read())
         return roles.get(agent_name, "")
@@ -379,32 +388,31 @@ def _fetch_role(server_port: int, agent_name: str) -> str:
         return ""
 
 
-def _fetch_active_rules(server_port: int, token: str = "") -> dict | None:
+def _fetch_active_rules(server_port: int, token: str = "", *, server_base: str = "") -> dict | None:
     """Fetch active rules from the server."""
     try:
         import urllib.request
+        url = (f"{server_base.rstrip('/')}/api/rules/active" if server_base
+               else f"http://127.0.0.1:{server_port}/api/rules/active")
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        req = urllib.request.Request(f"http://127.0.0.1:{server_port}/api/rules/active", headers=headers)
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=3) as resp:
             return json.loads(resp.read())
     except Exception:
         return None
 
 
-def _report_rule_sync(server_port: int, agent_name: str, epoch: int, token: str = ""):
+def _report_rule_sync(server_port: int, agent_name: str, epoch: int, token: str = "", *, server_base: str = ""):
     """Report that this agent has seen rules at the given epoch."""
     try:
         import urllib.request
+        url = (f"{server_base.rstrip('/')}/api/rules/agent_sync/{agent_name}" if server_base
+               else f"http://127.0.0.1:{server_port}/api/rules/agent_sync/{agent_name}")
         body = json.dumps({"epoch": epoch}).encode()
         headers = {"Content-Type": "application/json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{server_port}/api/rules/agent_sync/{agent_name}",
-            method="POST",
-            data=body,
-            headers=headers,
-        )
+        req = urllib.request.Request(url, method="POST", data=body, headers=headers)
         urllib.request.urlopen(req, timeout=3)
     except Exception:
         pass
@@ -412,96 +420,102 @@ def _report_rule_sync(server_port: int, agent_name: str, epoch: int, token: str 
 
 def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = False, trigger_flag=None,
                    server_port: int = 8300, agent_name: str = "", get_token_fn=None,
-                   refresh_interval: int = 10):
-    """Poll queue file and inject an MCP read task when triggered."""
+                   refresh_interval: int = 10, server_base: str = ""):
+    """Poll queue file (local) or HTTP trigger endpoint (remote) and inject an MCP read task when triggered."""
     first_mention = True
     last_rules_epoch = 0  # 0 = unknown/cold start — will inject on first trigger
     trigger_count = 0
     while True:
         try:
-            _, queue_file = get_identity_fn()
-            if queue_file.exists() and queue_file.stat().st_size > 0:
-                with open(queue_file, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-                queue_file.write_text("", "utf-8")
+            current_name, queue_file = get_identity_fn()
+            entries: list[dict] = []
 
-                has_trigger = False
-                channel = "general"
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    has_trigger = True
-                    if isinstance(data, dict) and "channel" in data:
-                        channel = data["channel"]
-
-                if has_trigger:
-                    # Signal activity BEFORE injecting — covers the thinking phase
-                    if trigger_flag is not None:
-                        trigger_flag[0] = True
-                    time.sleep(0.5)
-
-                    # Check if this is a job/activity-scoped trigger
-                    job_id = None
-                    custom_prompt = ""
-                    for line in lines:
+            if server_base:
+                # Remote mode: poll the HTTP trigger endpoint instead of a local file
+                import urllib.request as _ur
+                _token = get_token_fn() if get_token_fn else ""
+                try:
+                    url = f"{server_base.rstrip('/')}/api/trigger/{current_name}"
+                    req = _ur.Request(url, headers=_auth_headers(_token))
+                    with _ur.urlopen(req, timeout=5) as resp:
+                        data = json.loads(resp.read())
+                    entries = data.get("entries", [])
+                except Exception:
+                    entries = []
+            else:
+                # Local mode: read queue file written by the co-located server
+                if queue_file.exists() and queue_file.stat().st_size > 0:
+                    with open(queue_file, "r", encoding="utf-8") as f:
+                        raw_lines = f.readlines()
+                    queue_file.write_text("", "utf-8")
+                    for line in raw_lines:
                         line = line.strip()
                         if not line:
                             continue
                         try:
-                            data = json.loads(line)
-                            if isinstance(data, dict) and "job_id" in data:
-                                job_id = data["job_id"]
-                            if isinstance(data, dict):
-                                raw_prompt = data.get("prompt", "")
-                                if isinstance(raw_prompt, str) and raw_prompt.strip():
-                                    custom_prompt = raw_prompt.strip()
+                            entries.append(json.loads(line))
                         except json.JSONDecodeError:
-                            pass
+                            continue
 
-                    if custom_prompt:
-                        prompt = custom_prompt
-                    elif job_id:
-                        prompt = f"mcp read job_id={job_id} - you were mentioned in a job thread, take appropriate action"
-                    else:
-                        prompt = f"mcp read #{channel} - you were mentioned, take appropriate action"
+            if entries:
+                # Signal activity BEFORE injecting — covers the thinking phase
+                if trigger_flag is not None:
+                    trigger_flag[0] = True
+                time.sleep(0.5)
 
-                    # Use current identity (may have changed via rename)
-                    current_name, _ = get_identity_fn()
-                    # Append role if set — check both current name and base name
-                    role = _fetch_role(server_port, current_name)
-                    if not role and current_name != agent_name:
-                        role = _fetch_role(server_port, agent_name)
-                    if role:
-                        prompt += f"\n\nROLE: {role}"
+                channel = "general"
+                job_id = None
+                custom_prompt = ""
+                for entry in entries:
+                    if isinstance(entry, dict):
+                        if "channel" in entry:
+                            channel = entry["channel"]
+                        if "job_id" in entry:
+                            job_id = entry["job_id"]
+                        raw_prompt = entry.get("prompt", "")
+                        if isinstance(raw_prompt, str) and raw_prompt.strip():
+                            custom_prompt = raw_prompt.strip()
 
-                    # Smart rules injection: first trigger, epoch change, or periodic refresh
-                    _token = get_token_fn() if get_token_fn else ""
-                    rules_data = _fetch_active_rules(server_port, _token)
-                    trigger_count += 1
-                    if rules_data:
-                        # Use server-side refresh_interval (live from settings UI)
-                        ri = rules_data.get("refresh_interval", refresh_interval)
-                        need_inject = (
-                            last_rules_epoch == 0
-                            or rules_data["epoch"] != last_rules_epoch
-                            or (ri > 0 and trigger_count % ri == 0)
-                        )
-                        if need_inject:
-                            if rules_data["rules"]:
-                                rules_text = "; ".join(rules_data["rules"])
-                                prompt += f"\n\nRULES:\n{rules_text}"
-                            last_rules_epoch = rules_data["epoch"]
-                            _report_rule_sync(server_port, current_name, rules_data["epoch"], _token)
+                if custom_prompt:
+                    prompt = custom_prompt
+                elif job_id:
+                    prompt = f"mcp read job_id={job_id} - you were mentioned in a job thread, take appropriate action"
+                else:
+                    prompt = f"mcp read #{channel} - you were mentioned, take appropriate action"
 
-                    if first_mention and is_multi_instance:
-                        prompt += _IDENTITY_HINT
-                        first_mention = False
-                    inject_fn(prompt)
+                # Use current identity (may have changed via rename)
+                current_name, _ = get_identity_fn()
+                # Append role if set — check both current name and base name
+                role = _fetch_role(server_port, current_name, server_base=server_base)
+                if not role and current_name != agent_name:
+                    role = _fetch_role(server_port, agent_name, server_base=server_base)
+                if role:
+                    prompt += f"\n\nROLE: {role}"
+
+                # Smart rules injection: first trigger, epoch change, or periodic refresh
+                _token = get_token_fn() if get_token_fn else ""
+                rules_data = _fetch_active_rules(server_port, _token, server_base=server_base)
+                trigger_count += 1
+                if rules_data:
+                    # Use server-side refresh_interval (live from settings UI)
+                    ri = rules_data.get("refresh_interval", refresh_interval)
+                    need_inject = (
+                        last_rules_epoch == 0
+                        or rules_data["epoch"] != last_rules_epoch
+                        or (ri > 0 and trigger_count % ri == 0)
+                    )
+                    if need_inject:
+                        if rules_data["rules"]:
+                            rules_text = "; ".join(rules_data["rules"])
+                            prompt += f"\n\nRULES:\n{rules_text}"
+                        last_rules_epoch = rules_data["epoch"]
+                        _report_rule_sync(server_port, current_name, rules_data["epoch"], _token,
+                                          server_base=server_base)
+
+                if first_mention and is_multi_instance:
+                    prompt += _IDENTITY_HINT
+                    first_mention = False
+                inject_fn(prompt)
         except Exception:
             pass
 
@@ -535,10 +549,11 @@ def main():
     data_dir = ROOT / config.get("server", {}).get("data_dir", "./data")
     data_dir.mkdir(parents=True, exist_ok=True)
     server_port = config.get("server", {}).get("port", 8300)
+    server_base = config.get("server", {}).get("server_base_url", "").rstrip("/")
     mcp_cfg = config.get("mcp", {})
 
     try:
-        registration = _register_instance(server_port, agent, args.label)
+        registration = _register_instance(server_port, agent, args.label, server_base=server_base)
     except Exception as exc:
         print(f"  Registration failed ({exc}).")
         print("  Wrapper cannot continue without a registered identity.")
@@ -566,7 +581,10 @@ def main():
         from mcp_proxy import McpIdentityProxy
 
         transport = inject_cfg.get("mcp_transport", "http")
-        if transport == "sse":
+        if server_base:
+            upstream_base = server_base
+            proxy_path = "/sse" if transport == "sse" else "/mcp"
+        elif transport == "sse":
             upstream_base = f"http://127.0.0.1:{mcp_cfg.get('sse_port', 8201)}"
             proxy_path = "/sse"
         else:
@@ -609,6 +627,7 @@ def main():
                 inject_cfg, instance_name, data_dir, proxy_url,
                 token=new_token, mcp_cfg=mcp_cfg,
                 project_dir=(ROOT / cwd).resolve(),
+                server_base=server_base,
             )
         except Exception:
             pass
@@ -672,6 +691,7 @@ def main():
         token=assigned_token,
         mcp_cfg=mcp_cfg,
         project_dir=project_dir,
+        server_base=server_base,
     )
 
     print(f"  === {assigned_name.capitalize()} Chat Wrapper ===")
@@ -688,10 +708,11 @@ def main():
         while True:
             current_name, _ = get_identity()
             current_token = get_token()
-            url = f"http://127.0.0.1:{server_port}/api/heartbeat/{current_name}"
+            hb_url = (f"{server_base}/api/heartbeat/{current_name}" if server_base
+                      else f"http://127.0.0.1:{server_port}/api/heartbeat/{current_name}")
             try:
                 req = urllib.request.Request(
-                    url,
+                    hb_url,
                     method="POST",
                     data=b"",
                     headers=_auth_headers(current_token),
@@ -704,7 +725,8 @@ def main():
             except urllib.error.HTTPError as exc:
                 if exc.code == 409:
                     try:
-                        replacement = _register_instance(server_port, agent, args.label)
+                        replacement = _register_instance(server_port, agent, args.label,
+                                                         server_base=server_base)
                         set_runtime_identity(replacement["name"], replacement["token"])
                         _notify_recovery(data_dir, replacement["name"])
                     except Exception:
@@ -725,15 +747,20 @@ def main():
     _trigger_flag = [False]  # shared: queue watcher sets True, activity checker reads
     _refresh_interval = 10  # default; overridden per-trigger by server settings
 
+    _watcher_kwargs = {
+        "is_multi_instance": _is_multi_instance, "trigger_flag": _trigger_flag,
+        "server_port": server_port, "agent_name": assigned_name,
+        "get_token_fn": get_token, "refresh_interval": _refresh_interval,
+        "server_base": server_base,
+    }
+
     def start_watcher(inject_fn):
         nonlocal _watcher_inject_fn, _watcher_thread
         _watcher_inject_fn = inject_fn
         _watcher_thread = threading.Thread(
             target=_queue_watcher,
             args=(get_identity, inject_fn),
-            kwargs={"is_multi_instance": _is_multi_instance, "trigger_flag": _trigger_flag,
-                    "server_port": server_port, "agent_name": assigned_name,
-                    "get_token_fn": get_token, "refresh_interval": _refresh_interval},
+            kwargs=_watcher_kwargs,
             daemon=True,
         )
         _watcher_thread.start()
@@ -746,9 +773,7 @@ def main():
                 _watcher_thread = threading.Thread(
                     target=_queue_watcher,
                     args=(get_identity, _watcher_inject_fn),
-                    kwargs={"is_multi_instance": _is_multi_instance, "trigger_flag": _trigger_flag,
-                            "server_port": server_port, "agent_name": assigned_name,
-                            "get_token_fn": get_token, "refresh_interval": _refresh_interval},
+                    kwargs=_watcher_kwargs,
                     daemon=True,
                 )
                 _watcher_thread.start()
@@ -792,7 +817,8 @@ def main():
                 if should_send:
                     current_name, _ = get_identity()
                     current_token = get_token()
-                    url = f"http://127.0.0.1:{server_port}/api/heartbeat/{current_name}"
+                    url = (f"{server_base}/api/heartbeat/{current_name}" if server_base
+                           else f"http://127.0.0.1:{server_port}/api/heartbeat/{current_name}")
                     body = json.dumps({"active": active}).encode()
                     req = urllib.request.Request(
                         url,
@@ -854,8 +880,10 @@ def main():
         try:
             current_name, _ = get_identity()
             current_token = get_token()
+            dereg_url = (f"{server_base}/api/deregister/{current_name}" if server_base
+                         else f"http://127.0.0.1:{server_port}/api/deregister/{current_name}")
             dereg_req = urllib.request.Request(
-                f"http://127.0.0.1:{server_port}/api/deregister/{current_name}",
+                dereg_url,
                 method="POST",
                 data=b"",
                 headers=_auth_headers(current_token),
