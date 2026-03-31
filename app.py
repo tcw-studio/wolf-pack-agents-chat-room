@@ -48,7 +48,7 @@ session_token: str = ""
 
 # Room settings (persisted to data/settings.json)
 room_settings: dict = {
-    "title": "agentchattr",
+    "title": "Report Portal Dev Room",
     "username": "user",
     "font": "sans",
     "channels": ["general"],
