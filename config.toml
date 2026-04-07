@@ -41,6 +41,12 @@ mcp_settings_path = ".qwen/settings.json"
 mcp_transport = "http"
 inject_delay = 1.0
 
+[agents.shopify-dev]
+command = "claude"
+cwd = ".."
+color = "#96bf48"
+label = "Shopify Dev"
+
 [agents.kilo]
 command = "kilo"
 cwd = ".."
