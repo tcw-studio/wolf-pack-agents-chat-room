@@ -46,6 +46,8 @@ command = "claude"
 cwd = ".."
 color = "#96bf48"
 label = "Shopify Dev"
+mcp_inject = "flag"
+mcp_transport = "http"
 
 [agents.kilo]
 command = "kilo"

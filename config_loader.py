@@ -37,7 +37,8 @@ def load_config(root: Path | None = None) -> dict:
             if name not in config_agents:
                 config_agents[name] = agent_cfg
             else:
-                print(f"  Warning: Ignoring local agent '{name}' (already defined in config.toml)")
+                # Local overrides merge onto the base definition (e.g. cwd, color, label)
+                config_agents[name].update(agent_cfg)
 
         # Deep-merge all other sections — local values override base config.
         # This allows config.local.toml to override [server], [mcp], etc. per deployment.
