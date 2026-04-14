@@ -41,6 +41,14 @@ mcp_settings_path = ".qwen/settings.json"
 mcp_transport = "http"
 inject_delay = 1.0
 
+[agents.bc-extension-dev]
+command = "claude"
+cwd = ".."
+color = "#e8a838"
+label = "BC Extension Dev"
+mcp_inject = "flag"
+mcp_transport = "http"
+
 [agents.shopify-dev]
 command = "claude"
 cwd = ".."
